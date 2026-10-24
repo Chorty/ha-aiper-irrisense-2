@@ -21,16 +21,18 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from copy import deepcopy
 from datetime import timedelta
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import IrrisenseApi
+from .mqtt import iter_upchan_commands
 from .schedule import parse_overview
 from .const import (
     CONF_ENABLE_EXPERIMENTAL_SENSORS,
@@ -473,10 +475,19 @@ class IrrisenseCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
     # ------------------------------------------------------------------ #
 
     def handle_mqtt_message(self, sn: str, data: dict[str, Any]) -> None:
-        """Callback invoked (on the MQTT thread) for every received message.
+        """Hand off MQTT-thread messages before changing coordinator state."""
+        if not isinstance(data, dict):
+            return
+        self.hass.loop.call_soon_threadsafe(
+            self._async_handle_mqtt_message, sn, deepcopy(data)
+        )
+
+    @callback
+    def _async_handle_mqtt_message(self, sn: str, data: dict[str, Any]) -> None:
+        """Merge a received message on Home Assistant's event loop.
 
         We stash the parsed payload under `_data[sn]["mqtt"][<bucket>]` and
-        schedule a HA-thread update so entities refresh. Any "device is
+        push updated data to entities. Any "device is
         working now" hint opens a fast-poll window.
         """
         if not isinstance(data, dict):
@@ -510,22 +521,10 @@ class IrrisenseCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             #   * stored dict: always carries a ``data`` key with the inner
             #     body, regardless of input shape — entity code reads
             #     ``msg["data"]`` and must keep working on both.
-            cmd_base: str | None = None
-            body: dict[str, Any] | None = None
-            legacy_type = data.get("type")
-            if isinstance(legacy_type, str) and legacy_type:
-                cmd_base = legacy_type[3:] if legacy_type.startswith("up_") else legacy_type
-                inner = data.get("data")
-                body = inner if isinstance(inner, dict) else {}
-            else:
-                # Pick the first non-underscore top-level key as the cmd name.
-                for k, v in data.items():
-                    if isinstance(k, str) and not k.startswith("_"):
-                        cmd_base = k[3:] if k.startswith("up_") else k
-                        body = v if isinstance(v, dict) else {}
-                        break
-
-            if cmd_base:
+            commands = list(iter_upchan_commands(data))
+            if not commands:
+                mqtt_slot["up_raw"] = data
+            for cmd_base, body in commands:
                 normalised: dict[str, Any] = {
                     "type": cmd_base,
                     "data": body or {},
@@ -574,6 +573,7 @@ class IrrisenseCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 # likely be stale and shouldn't suppress a real timeout.
                 if cmd_base in (
                     "realTimeProgress",
+                    "realTimeProgressReport",
                     "realtimeStatus",
                     "workInfoReport",
                     "workInfo",
@@ -595,13 +595,10 @@ class IrrisenseCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                     "realTimeProgressReport",
                 ):
                     self.trigger_fast_poll()
-            else:
-                mqtt_slot["up_raw"] = data
         else:
             mqtt_slot.setdefault("other", []).append({"topic": topic, "data": data})
 
-        # Push updated data to entities (thread-safe).
-        self.hass.loop.call_soon_threadsafe(self.async_set_updated_data, self._data)
+        self.async_set_updated_data(self._data)
 
     # ------------------------------------------------------------------ #
     # Command wrappers (used by services + entity actions)
@@ -947,6 +944,7 @@ class IrrisenseCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
     # precedence; setWorkMode echoes are also rich but less frequent.
     _ACTIVE_SOURCES = (
         "up_realTimeProgress",
+        "up_realTimeProgressReport",
         "up_realtimeStatus",
         "up_setWorkMode",
         "up_workInfoReport",
