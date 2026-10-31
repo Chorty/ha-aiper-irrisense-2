@@ -32,6 +32,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import IrrisenseApi
+from .device_report import extract_sections, latest_field
 from .mqtt import iter_upchan_commands
 from .schedule import parse_overview
 from .const import (
@@ -41,6 +42,7 @@ from .const import (
     CONF_MAP_REFRESH_HOURS,
     CONF_POLL_INTERVAL,
     CONF_REMINDER_REFRESH_HOURS,
+    CONF_STATUS_QUERY_MINUTES,
     CONF_WEATHER_REFRESH_HOURS,
     DEFAULT_ENABLE_WEATHER,
     DEFAULT_FAST_SCAN_INTERVAL,
@@ -49,6 +51,7 @@ from .const import (
     DEFAULT_MAP_REFRESH_HOURS,
     DEFAULT_REMINDER_REFRESH_HOURS,
     DEFAULT_SCAN_INTERVAL,
+    DEFAULT_STATUS_QUERY_MINUTES,
     DEFAULT_WEATHER_REFRESH_HOURS,
     DOMAIN,
     POINT_TIME_LOW,
@@ -79,6 +82,10 @@ MAP_RETRY_BACKOFF_SECONDS = 300
 _LOGGER = logging.getLogger(__name__)
 
 _SETTINGS_REFRESH_SECONDS = 30 * 60  # 30 min
+# A non-idle status report younger than this means the device is already streaming status.
+_STATUS_BUSY_SECONDS = 120
+# An idle workInfo reply this soon after our own status query is that query's answer.
+_STATUS_REPLY_SECONDS = 30
 
 
 def _extract_map_id(body: dict[str, Any] | None) -> int | None:
@@ -247,6 +254,9 @@ class IrrisenseCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         # default; the entry reloads on options change, so toggling this
         # creates/removes the entities on the next reload.
         self._experimental = bool(opts.get(CONF_ENABLE_EXPERIMENTAL_SENSORS, False))
+        # Periodic workInfo snapshot so the raw status sensors stay current while idle (0 = off).
+        self._status_query_s = int(opts.get(CONF_STATUS_QUERY_MINUTES, DEFAULT_STATUS_QUERY_MINUTES)) * 60
+        self._last_status_query: dict[str, float] = {}
 
     # ------------------------------------------------------------------ #
     # Public helpers
@@ -452,6 +462,27 @@ class IrrisenseCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             if await self._query_plans(sn, slot):
                 self._last_plans_query[sn] = now
 
+        await self._maybe_query_work_info(sn)
+
+    async def _maybe_query_work_info(self, sn: str) -> None:
+        """Ask for a workInfo snapshot every `status_query_minutes`.
+
+        Keeps the raw status sensors (pressure, valve, heading) current while
+        idle. Skipped while the device recently reported a non-idle status,
+        since it streams status then anyway. Like the plan query, the cadence
+        stamp only advances after a query actually went out.
+        """
+        if self._status_query_s <= 0 or not self.api.is_mqtt_connected():
+            return
+        now = time.time()
+        if now - self._last_status_query.get(sn, 0) < self._status_query_s:
+            return
+        status, seen = latest_field(self._data.get(sn, {}).get("mqtt", {}), "status")
+        if seen is not None and now - seen < _STATUS_BUSY_SECONDS and status not in (0, "0"):
+            return
+        if await self.hass.async_add_executor_job(self.api.query_work_info, sn):
+            self._last_status_query[sn] = now
+
     async def _query_plans(self, sn: str, slot: dict[str, Any]) -> bool:
         """Publish `WrPlanOverview` + a `WrPlanDetail` per known plan id.
 
@@ -497,6 +528,8 @@ class IrrisenseCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         mqtt_slot = slot.setdefault("mqtt", {})
 
         topic = data.get("_topic", "")
+        # Arrival time for every bucket (upChan frames also get their own `_ts` below).
+        data["_ts"] = time.time()
 
         # Bucket by topic family so entities can distinguish reports vs. commands
         if "shadow/get/accepted" in topic:
@@ -584,6 +617,14 @@ class IrrisenseCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                             self.api.note_upchan_ack(sn, "setWorkMode")
                         except Exception:  # noqa: BLE001
                             pass
+                # An idle answer to our own periodic status query is not news;
+                # skip the fast-poll window it would otherwise open every time.
+                if (
+                    cmd_base == "workInfo"
+                    and (body or {}).get("status") in (0, "0")
+                    and normalised["_ts"] - self._last_status_query.get(sn, 0) < _STATUS_REPLY_SECONDS
+                ):
+                    continue
                 # If the device just reported a new workInfo / setWorkMode ACK,
                 # open a fast-poll window so the REST layer catches up quickly.
                 if cmd_base in (
@@ -597,6 +638,11 @@ class IrrisenseCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                     self.trigger_fast_poll()
         else:
             mqtt_slot.setdefault("other", []).append({"topic": topic, "data": data})
+
+        # NetStat / OpInfo / alarm payloads, kept per section so a later frame
+        # without them (a heartbeat, a partial shadow update) does not hide them.
+        for key, section in extract_sections(data).items():
+            mqtt_slot.setdefault("sections", {})[key] = {"data": section, "_ts": data["_ts"]}
 
         self.async_set_updated_data(self._data)
 

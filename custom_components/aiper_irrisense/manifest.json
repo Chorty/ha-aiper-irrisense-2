@@ -2,6 +2,7 @@
   "domain": "aiper_irrisense",
   "name": "Aiper Irrisense 2",
   "codeowners": ["@Merlz"],
+  "after_dependencies": ["bluetooth"],
   "config_flow": true,
   "documentation": "https://github.com/Merlz/ha-aiper-irrisense-2",
   "issue_tracker": "https://github.com/Merlz/ha-aiper-irrisense-2/issues",

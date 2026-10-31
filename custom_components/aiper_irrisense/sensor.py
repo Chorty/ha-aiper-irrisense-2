@@ -9,7 +9,8 @@ Field names are confirmed from a live diagnostics dump:
 from __future__ import annotations
 
 import math
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
@@ -18,8 +19,9 @@ from homeassistant.const import EntityCategory, UnitOfLength, UnitOfVolume
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import CONF_ENABLE_EXPERIMENTAL_SENSORS, DOMAIN
+from .const import CONF_BLUETOOTH_ADDRESS, CONF_ENABLE_EXPERIMENTAL_SENSORS, DOMAIN
 from .coordinator import IrrisenseCoordinator
+from .device_report import heading_degrees, latest_field, raw_snapshot
 from .entity import IrrisenseEntity
 from .geometry import spray_reach_m
 from .schedule import dose_label, parse_plan_detail, weekday_abbr
@@ -58,8 +60,26 @@ async def async_setup_entry(
                 LastRunDurationSensor(coordinator, sn),
                 LastRunStatusSensor(coordinator, sn),
                 SchedulesSensor(coordinator, sn),
+                WaterPressureSensor(coordinator, sn),
+                InternalValveSensor(coordinator, sn),
+                HeadHeadingSensor(coordinator, sn),
+                DeviceStatusSensor(coordinator, sn),
+                LastAlarmSensor(coordinator, sn),
+                RawReportSensor(coordinator, sn),
+                *(
+                    SectionFieldSensor(coordinator, sn, section, field, key)
+                    for section, field, key in SECTION_FIELDS
+                ),
             ]
         )
+        address = (entry.options.get(CONF_BLUETOOTH_ADDRESS) or "").strip().upper()
+        if address:
+            entities.extend(
+                [
+                    BluetoothRssiSensor(coordinator, sn, address),
+                    BluetoothLastHeardSensor(coordinator, sn, address),
+                ]
+            )
         if entry.options.get(CONF_ENABLE_EXPERIMENTAL_SENSORS, False):
             entities.extend(
                 [
@@ -871,3 +891,261 @@ class SchedulesSensor(IrrisenseEntity, SensorEntity):
                 }
             )
         return {"schedules": schedules}
+
+
+# --------------------------------------------------------------------------- #
+# Raw device report — fields the device sends that the sensors above don't use
+# --------------------------------------------------------------------------- #
+
+
+def _utc(ts: float | None) -> datetime | None:
+    return datetime.fromtimestamp(ts, timezone.utc) if ts is not None else None
+
+
+def _scalar(value: Any) -> Any:
+    if isinstance(value, bool):
+        return int(value)
+    return value if isinstance(value, (int, float, str)) else None
+
+
+class _DeviceFieldSensor(IrrisenseEntity, SensorEntity):
+    """One field from the freshest status frame (workInfo / realtime reports).
+
+    Values update whenever such a frame arrives: during runs, after start or
+    stop, and on the periodic status query (``status_query_minutes``).
+    ``reported_at`` is when Home Assistant received the frame.
+    """
+
+    _field: str
+
+    def __init__(self, coordinator: IrrisenseCoordinator, sn: str, key: str) -> None:
+        super().__init__(coordinator, sn, key)
+        self._attr_translation_key = key
+
+    def _reading(self) -> tuple[Any, float | None]:
+        return latest_field(self._mqtt, self._field)
+
+    @property
+    def native_value(self) -> Any:
+        value, _ = self._reading()
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        return value
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        _, ts = self._reading()
+        return {"reported_at": _utc(ts).isoformat()} if ts is not None else None
+
+
+class WaterPressureSensor(_DeviceFieldSensor):
+    """Device ``waterpress``, unconverted.
+
+    Unknown unit. Observed ~102.7 at rest whether the hose supply is open or
+    closed, rising as the internal valve opens, so it is not supply pressure.
+    """
+
+    _attr_icon = "mdi:gauge"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _field = "waterpress"
+
+    def __init__(self, coordinator: IrrisenseCoordinator, sn: str) -> None:
+        super().__init__(coordinator, sn, "water_pressure")
+
+
+class InternalValveSensor(_DeviceFieldSensor):
+    """The sprinkler's own valve position (device ``valve``, raw units; not the hose supply valve)."""
+
+    _attr_icon = "mdi:valve"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _field = "valve"
+
+    def __init__(self, coordinator: IrrisenseCoordinator, sn: str) -> None:
+        super().__init__(coordinator, sn, "internal_valve")
+
+
+class HeadHeadingSensor(_DeviceFieldSensor):
+    """Head heading from device ``rotate``: signed degrees from home, clockwise positive.
+
+    Unlike ``head_angle`` (derived from the live spray point during runs),
+    this is the device's own reading and is available whenever a status frame
+    arrives.
+    """
+
+    _attr_icon = "mdi:rotate-right"
+    _attr_native_unit_of_measurement = "°"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _field = "rotate"
+
+    def __init__(self, coordinator: IrrisenseCoordinator, sn: str) -> None:
+        super().__init__(coordinator, sn, "head_heading")
+
+    @property
+    def native_value(self) -> float | None:
+        value, _ = self._reading()
+        return heading_degrees(value)
+
+
+class DeviceStatusSensor(_DeviceFieldSensor):
+    """Device ``status`` code, raw (0 = idle; other codes are mode/run states)."""
+
+    _attr_icon = "mdi:list-status"
+    _field = "status"
+
+    def __init__(self, coordinator: IrrisenseCoordinator, sn: str) -> None:
+        super().__init__(coordinator, sn, "device_status")
+
+
+class _SectionSensor(IrrisenseEntity, SensorEntity):
+    _section: str
+
+    def _section_frame(self) -> tuple[dict[str, Any], float | None]:
+        sections = self._mqtt.get("sections")
+        entry = sections.get(self._section) if isinstance(sections, dict) else None
+        if not isinstance(entry, dict) or not isinstance(entry.get("data"), dict):
+            return {}, None
+        return entry["data"], entry.get("_ts")
+
+
+class LastAlarmSensor(_SectionSensor):
+    """Most recent alarm payload (``AlarmReport`` / ``Alarm``); state is its code."""
+
+    _attr_icon = "mdi:alert-circle-outline"
+    _attr_translation_key = "last_alarm"
+    _section = "alarm"
+
+    def __init__(self, coordinator: IrrisenseCoordinator, sn: str) -> None:
+        super().__init__(coordinator, sn, "last_alarm")
+
+    @property
+    def native_value(self) -> Any:
+        data, _ = self._section_frame()
+        return _scalar(data.get("code"))
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        data, ts = self._section_frame()
+        if ts is None:
+            return None
+        return {**data, "received_at": _utc(ts).isoformat()}
+
+
+# (section, field, entity key) for the network / operation sections.
+SECTION_FIELDS = (
+    ("net_stat", "ap", "net_ap"),
+    ("net_stat", "ble", "net_ble"),
+    ("net_stat", "cert", "net_cert"),
+    ("net_stat", "nearFieldBind", "net_near_field_bind"),
+    ("net_stat", "sta", "net_sta"),
+    ("op_info", "status", "op_status"),
+)
+
+
+class SectionFieldSensor(_SectionSensor):
+    """One raw field of the ``NetStat`` / ``OpInfo`` payloads, unconverted."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: IrrisenseCoordinator, sn: str, section: str, field: str, key: str) -> None:
+        super().__init__(coordinator, sn, key)
+        self._section, self._field = section, field
+        self._attr_translation_key = key
+
+    @property
+    def native_value(self) -> Any:
+        data, _ = self._section_frame()
+        return _scalar(data.get(self._field))
+
+
+class RawReportSensor(IrrisenseEntity, SensorEntity):
+    """Latest frame of every MQTT topic/command, so undecoded fields are visible.
+
+    State is when the newest frame arrived. The ``frames`` attribute is kept
+    out of the recorder: it is large and changes on every message.
+    """
+
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:code-json"
+    _attr_translation_key = "raw_report"
+    _unrecorded_attributes = frozenset({"frames"})
+
+    def __init__(self, coordinator: IrrisenseCoordinator, sn: str) -> None:
+        super().__init__(coordinator, sn, "raw_report")
+
+    @property
+    def native_value(self) -> datetime | None:
+        newest, _ = raw_snapshot(self._mqtt)
+        return _utc(newest)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        _, frames = raw_snapshot(self._mqtt)
+        return {"frames": frames}
+
+
+# --------------------------------------------------------------------------- #
+# Bluetooth (passive): how well Home Assistant's Bluetooth hears the device
+# --------------------------------------------------------------------------- #
+
+
+def _last_advertisement(hass: HomeAssistant, address: str):
+    """Newest advertisement HA's Bluetooth stack holds for ``address``; no connection is made."""
+    if "bluetooth" not in hass.config.components:
+        return None
+    from homeassistant.components import bluetooth  # noqa: PLC0415 - optional integration
+
+    return bluetooth.async_last_service_info(hass, address, connectable=False)
+
+
+class _BluetoothSensor(IrrisenseEntity, SensorEntity):
+    """Polled every 30 s from HA's advertisement cache (the device advertises several times a second)."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: IrrisenseCoordinator, sn: str, key: str, address: str) -> None:
+        super().__init__(coordinator, sn, key)
+        self._address = address
+        self._attr_translation_key = key
+        self._info = None
+
+    @property
+    def should_poll(self) -> bool:
+        return True
+
+    async def async_update(self) -> None:
+        # Overrides CoordinatorEntity.async_update, which would refresh the cloud coordinator.
+        self._info = _last_advertisement(self.hass, self._address)
+
+
+class BluetoothRssiSensor(_BluetoothSensor):
+    _attr_device_class = SensorDeviceClass.SIGNAL_STRENGTH
+    _attr_native_unit_of_measurement = "dBm"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, coordinator: IrrisenseCoordinator, sn: str, address: str) -> None:
+        super().__init__(coordinator, sn, "bluetooth_rssi", address)
+
+    @property
+    def native_value(self) -> int | None:
+        return self._info.rssi if self._info is not None else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        source = getattr(self._info, "source", None)
+        return {"source": source} if source else None
+
+
+class BluetoothLastHeardSensor(_BluetoothSensor):
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_icon = "mdi:bluetooth-audio"
+
+    def __init__(self, coordinator: IrrisenseCoordinator, sn: str, address: str) -> None:
+        super().__init__(coordinator, sn, "bluetooth_last_heard", address)
+
+    @property
+    def native_value(self) -> datetime | None:
+        if self._info is None:
+            return None
+        # Advertisement times are monotonic seconds; convert to wall-clock.
+        return datetime.now(timezone.utc) - timedelta(seconds=max(0.0, time.monotonic() - self._info.time))

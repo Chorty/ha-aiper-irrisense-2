@@ -47,10 +47,13 @@ CONF_REMINDER_REFRESH_HOURS: Final = "reminder_refresh_hours"
 CONF_WEATHER_REFRESH_HOURS: Final = "weather_refresh_hours"
 CONF_ENABLE_WEATHER: Final = "enable_weather"
 CONF_ENABLE_EXPERIMENTAL_SENSORS: Final = "enable_experimental_sensors"
+CONF_STATUS_QUERY_MINUTES: Final = "status_query_minutes"
+CONF_BLUETOOTH_ADDRESS: Final = "bluetooth_address"
 
 DEFAULT_SCAN_INTERVAL: Final = 120  # seconds
 DEFAULT_FAST_SCAN_INTERVAL: Final = 5  # seconds during an active watering event
 DEFAULT_FAST_WINDOW_SECONDS: Final = 60
+DEFAULT_STATUS_QUERY_MINUTES: Final = 5  # periodic workInfo snapshot; 0 disables
 DEFAULT_MAP_REFRESH_HOURS: Final = 6
 DEFAULT_HISTORY_REFRESH_HOURS: Final = 6
 DEFAULT_REMINDER_REFRESH_HOURS: Final = 24

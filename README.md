@@ -99,6 +99,22 @@ so a device called *IrriSense Garden* will have
 | `switch`        | Rain sensing / Wind sensing   | Enable / disable each sensor                                            |
 | `switch`        | Drainage / Pesticide / Task / Water shortage reminders | Notification toggles                               |
 
+**Raw device report.** These pass through fields the device sends over MQTT, unconverted. They update when a
+status frame arrives (during runs, after start/stop, and on the periodic status query below). Disable any you
+don't need.
+
+| Domain          | Name                          | Notes                                                                   |
+|-----------------|-------------------------------|-------------------------------------------------------------------------|
+| `sensor`        | Water pressure (raw)          | Device `waterpress`, unknown unit. Rises as the internal valve opens; not hose-supply pressure |
+| `sensor`        | Internal valve                | Device `valve`: the sprinkler's own valve position, raw units           |
+| `sensor`        | Head heading                  | Device `rotate` as signed degrees from home, clockwise positive         |
+| `sensor`        | Device status                 | Device `status` code, raw (0 = idle)                                    |
+| `binary_sensor` | Water shortage                | Device `hydropenia` from live progress frames                           |
+| `sensor`        | Last alarm                    | Code of the latest `AlarmReport` / `Alarm`; payload in attributes       |
+| `sensor`        | Network AP / BLE / certificate / station, Near-field bind, Operation status | Raw `NetStat` / `OpInfo` fields (diagnostic) |
+| `sensor`        | Raw device report             | Time of the newest MQTT frame; `frames` attribute holds the latest frame per topic/command (not recorded) |
+| `sensor`        | Bluetooth signal / last heard | Only when a Bluetooth address is configured. Read passively from Home Assistant's Bluetooth advertisements; no connection is made |
+
 ## Services
 
 The integration registers four services under the `aiper_irrisense` domain.
@@ -155,6 +171,14 @@ options available via the integration's **Configure** button:
   sensors. Off by default. The request paths are verified but the record
   shapes couldn't be fully exercised on test hardware, so they're marked
   experimental — see the note under *Known limitations*.
+- **Status query interval (minutes)** — how often to ask the device for a
+  status snapshot (`workInfo`) so the raw device-report sensors stay current
+  while idle. Default 5; `0` turns it off. Skipped while the device is
+  already reporting a run. Checked on each poll, so the effective interval
+  rounds up to the next poll.
+- **Sprinkler Bluetooth address** — optional. When set, adds Bluetooth
+  signal / last-heard sensors from Home Assistant's own Bluetooth
+  advertisements (local adapter or proxy).
 
 ## Known limitations
 

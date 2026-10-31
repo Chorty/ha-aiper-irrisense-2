@@ -12,6 +12,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
 from .coordinator import IrrisenseCoordinator
+from .device_report import as_flag, latest_field
 from .entity import IrrisenseEntity
 
 
@@ -32,6 +33,7 @@ async def async_setup_entry(
                 RainSensingBinarySensor(coordinator, sn),
                 SessionConflictBinarySensor(coordinator, sn),
                 LastRunFaultBinarySensor(coordinator, sn),
+                WaterShortageBinarySensor(coordinator, sn),
             ]
         )
     async_add_entities(entities)
@@ -174,3 +176,21 @@ class MqttConnectedBinarySensor(IrrisenseEntity, BinarySensorEntity):
     @property
     def is_on(self) -> bool:
         return self.coordinator.api.is_mqtt_connected()
+
+
+class WaterShortageBinarySensor(IrrisenseEntity, BinarySensorEntity):
+    """Live water-shortage flag (device ``hydropenia``), reported in progress frames during runs.
+
+    Unknown until the device has sent the flag; it keeps the last reported value between runs.
+    """
+
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+    _attr_translation_key = "water_shortage"
+
+    def __init__(self, coordinator: IrrisenseCoordinator, sn: str) -> None:
+        super().__init__(coordinator, sn, "water_shortage")
+
+    @property
+    def is_on(self) -> bool | None:
+        value, _ = latest_field(self._mqtt, "hydropenia")
+        return as_flag(value)

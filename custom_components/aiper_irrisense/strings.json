@@ -41,9 +41,14 @@
           "reminder_refresh_hours": "Nozzle / reminder refresh (hours)",
           "enable_weather": "Enable weather (sends HA home location to Aiper's cloud)",
           "weather_refresh_hours": "Weather refresh (hours)",
-          "enable_experimental_sensors": "Enable experimental sensors (pesticide usage, skip history)"
+          "enable_experimental_sensors": "Enable experimental sensors (pesticide usage, skip history)",
+          "status_query_minutes": "Status query interval (minutes, 0 = off)",
+          "bluetooth_address": "Sprinkler Bluetooth address (optional, for signal sensors)"
         }
       }
+    },
+    "error": {
+      "invalid_bluetooth_address": "Enter the Bluetooth address as six pairs of hex digits separated by colons, or leave it empty."
     }
   },
   "entity": {
@@ -89,7 +94,21 @@
         }
       },
       "last_skip": {"name": "Last skip reason"},
-      "pesticide_usage": {"name": "Pesticide usage zones"}
+      "pesticide_usage": {"name": "Pesticide usage zones"},
+      "water_pressure": {"name": "Water pressure (raw)"},
+      "internal_valve": {"name": "Internal valve"},
+      "head_heading": {"name": "Head heading"},
+      "device_status": {"name": "Device status"},
+      "last_alarm": {"name": "Last alarm"},
+      "raw_report": {"name": "Raw device report"},
+      "net_ap": {"name": "Network AP"},
+      "net_ble": {"name": "Network BLE"},
+      "net_cert": {"name": "Network certificate"},
+      "net_near_field_bind": {"name": "Near-field bind"},
+      "net_sta": {"name": "Network station"},
+      "op_status": {"name": "Operation status"},
+      "bluetooth_rssi": {"name": "Bluetooth signal"},
+      "bluetooth_last_heard": {"name": "Bluetooth last heard"}
     },
     "binary_sensor": {
       "mqtt_connected": {"name": "MQTT connected"},
@@ -97,7 +116,8 @@
       "watering": {"name": "Watering"},
       "session_conflict": {"name": "Session conflict"},
       "last_run_fault": {"name": "Last run fault"},
-      "rain_sensing": {"name": "Rain sensing active"}
+      "rain_sensing": {"name": "Rain sensing active"},
+      "water_shortage": {"name": "Water shortage"}
     },
     "image": {
       "zone_map": {"name": "Zone map"}

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 import voluptuous as vol
@@ -14,6 +15,7 @@ from homeassistant.exceptions import HomeAssistantError
 
 from .api import IrrisenseApi
 from .const import (
+    CONF_BLUETOOTH_ADDRESS,
     CONF_ENABLE_EXPERIMENTAL_SENSORS,
     CONF_ENABLE_MQTT,
     CONF_ENABLE_WEATHER,
@@ -23,12 +25,14 @@ from .const import (
     CONF_POLL_INTERVAL,
     CONF_REGION,
     CONF_REMINDER_REFRESH_HOURS,
+    CONF_STATUS_QUERY_MINUTES,
     CONF_WEATHER_REFRESH_HOURS,
     DEFAULT_ENABLE_WEATHER,
     DEFAULT_HISTORY_REFRESH_HOURS,
     DEFAULT_MAP_REFRESH_HOURS,
     DEFAULT_REMINDER_REFRESH_HOURS,
     DEFAULT_SCAN_INTERVAL,
+    DEFAULT_STATUS_QUERY_MINUTES,
     DEFAULT_WEATHER_REFRESH_HOURS,
     DOMAIN,
 )
@@ -152,10 +156,15 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
+        errors: dict[str, str] = {}
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+            address = (user_input.get(CONF_BLUETOOTH_ADDRESS) or "").strip().upper()
+            if address and not _BLUETOOTH_ADDRESS.fullmatch(address):
+                errors[CONF_BLUETOOTH_ADDRESS] = "invalid_bluetooth_address"
+            else:
+                return self.async_create_entry(title="", data={**user_input, CONF_BLUETOOTH_ADDRESS: address})
 
-        current = self._config_entry.options
+        current = {**self._config_entry.options, **(user_input or {})}
         schema = vol.Schema(
             {
                 vol.Optional(
@@ -194,9 +203,20 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     CONF_ENABLE_EXPERIMENTAL_SENSORS,
                     default=current.get(CONF_ENABLE_EXPERIMENTAL_SENSORS, False),
                 ): bool,
+                vol.Optional(
+                    CONF_STATUS_QUERY_MINUTES,
+                    default=current.get(CONF_STATUS_QUERY_MINUTES, DEFAULT_STATUS_QUERY_MINUTES),
+                ): vol.All(vol.Coerce(int), vol.Range(min=0, max=60)),
+                vol.Optional(
+                    CONF_BLUETOOTH_ADDRESS,
+                    default=current.get(CONF_BLUETOOTH_ADDRESS, ""),
+                ): str,
             }
         )
-        return self.async_show_form(step_id="init", data_schema=schema)
+        return self.async_show_form(step_id="init", data_schema=schema, errors=errors)
+
+
+_BLUETOOTH_ADDRESS = re.compile(r"[0-9A-F]{2}(:[0-9A-F]{2}){5}")
 
 
 class InvalidAuth(HomeAssistantError):

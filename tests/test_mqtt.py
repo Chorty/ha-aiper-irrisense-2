@@ -35,6 +35,7 @@ def load_file(name):
 protocol = load_file('mqtt')
 constants = load_file('const')
 schedule = load_file('schedule')
+device_report = load_file('device_report')
 
 
 def coordinator_type():
@@ -49,7 +50,8 @@ def coordinator_type():
     namespace = dict(vars(constants))
     namespace.update(callback=lambda f: f, deepcopy=deepcopy, time=SimpleNamespace(time=lambda: 100.0),
                      _LOGGER=logging.getLogger(__name__), parse_overview=schedule.parse_overview,
-                     iter_upchan_commands=protocol.iter_upchan_commands)
+                     iter_upchan_commands=protocol.iter_upchan_commands,
+                     extract_sections=device_report.extract_sections, _STATUS_REPLY_SECONDS=30)
     module = ast.Module(body=[ast.ImportFrom(module='__future__', names=[ast.alias(name='annotations')], level=0), *helpers, cls], type_ignores=[])
     exec(compile(ast.fix_missing_locations(module), str(COMPONENT / 'coordinator.py'), 'exec'), namespace)
     return namespace['IrrisenseCoordinator'], namespace
@@ -90,6 +92,7 @@ class CoordinatorTests(unittest.TestCase):
         c.hass = SimpleNamespace(loop=self.loop)
         c.api = SimpleNamespace(note_upchan_ack=Mock())
         c._data = {}
+        c._last_status_query = {}
         c._fast_until = 0.0
         c._fast_interval = 5
         c.update_interval = 60
